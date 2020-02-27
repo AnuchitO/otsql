@@ -1,7 +1,8 @@
 package ocsql
 
 import (
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/api/core"
+	"go.opentelemetry.io/otel/api/trace"
 )
 
 // TraceOption allows for managing ocsql configuration using functional options.
@@ -49,7 +50,7 @@ type TraceOptions struct {
 	QueryParams bool
 
 	// DefaultAttributes will be set to each span as default.
-	DefaultAttributes []trace.Attribute
+	DefaultAttributes []core.KeyValue
 
 	// DisableErrSkip, if set to true, will suppress driver.ErrSkip errors in spans.
 	DisableErrSkip bool
@@ -83,7 +84,7 @@ func WithOptions(options TraceOptions) TraceOption {
 	return func(o *TraceOptions) {
 		*o = options
 		o.DefaultAttributes = append(
-			[]trace.Attribute(nil), options.DefaultAttributes...,
+			[]core.KeyValue(nil), options.DefaultAttributes...,
 		)
 	}
 }
@@ -157,7 +158,7 @@ func WithQueryParams(b bool) TraceOption {
 }
 
 // WithDefaultAttributes will be set to each span as default.
-func WithDefaultAttributes(attrs ...trace.Attribute) TraceOption {
+func WithDefaultAttributes(attrs ...core.KeyValue) TraceOption {
 	return func(o *TraceOptions) {
 		o.DefaultAttributes = attrs
 	}

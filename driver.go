@@ -11,7 +11,10 @@ import (
 	"strconv"
 	"sync"
 
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/api/core"
+	"go.opentelemetry.io/otel/api/global"
+	"go.opentelemetry.io/otel/api/trace"
+	"google.golang.org/grpc/codes"
 )
 
 type conn interface {
@@ -27,8 +30,10 @@ type conn interface {
 
 var (
 	regMu              sync.Mutex
-	attrMissingContext = trace.StringAttribute("ocsql.warning", "missing upstream context")
-	attrDeprecated     = trace.StringAttribute("ocsql.warning", "database driver uses deprecated features")
+	attrMissingContext = core.Key("ocsql.warning").String("missing upstream context")
+	attrDeprecated     = core.Key("ocsql.warning").String("database driver uses deprecated features")
+	// attrMissingContext = trace.StringAttribute("ocsql.warning", "missing upstream context")
+	// attrDeprecated     = trace.StringAttribute("ocsql.warning", "database driver uses deprecated features")
 
 	// Compile time assertions
 	_ driver.Driver                         = &ocDriver{}
@@ -125,23 +130,23 @@ type ocConn struct {
 func (c ocConn) Ping(ctx context.Context) (err error) {
 	defer recordCallStats(ctx, "go.sql.ping")(err)
 
-	if c.options.Ping && (c.options.AllowRoot || trace.FromContext(ctx) != nil) {
-		var span *trace.Span
-		ctx, span = trace.StartSpan(ctx, "sql:ping",
+	tr := global.TraceProvider().Tracer("sql.ping")
+
+	if c.options.Ping && (c.options.AllowRoot || trace.SpanFromContext(ctx) != nil) {
+		var span trace.Span
+		ctx, span = tr.Start(ctx, "sql:ping",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
 		if len(c.options.DefaultAttributes) > 0 {
-			span.AddAttributes(c.options.DefaultAttributes...)
+			span.SetAttributes(c.options.DefaultAttributes...)
+			// span.AddAttributes()
 		}
 		defer func() {
 			if err != nil {
-				span.SetStatus(trace.Status{
-					Code:    trace.StatusCodeUnavailable,
-					Message: err.Error(),
-				})
+				span.SetStatus(codes.Unavailable)
 			} else {
-				span.SetStatus(trace.Status{Code: trace.StatusCodeOK})
+				span.SetStatus(codes.OK)
 			}
 			span.End()
 		}()
@@ -156,31 +161,31 @@ func (c ocConn) Ping(ctx context.Context) (err error) {
 func (c ocConn) Exec(query string, args []driver.Value) (res driver.Result, err error) {
 	defer recordCallStats(context.Background(), "go.sql.exec")(err)
 
+	tr := global.TraceProvider().Tracer("sql.exec")
+
 	if exec, ok := c.parent.(driver.Execer); ok {
 		if !c.options.AllowRoot {
 			return exec.Exec(query, args)
 		}
 
-		ctx, span := trace.StartSpan(context.Background(), "sql:exec",
+		ctx, span := tr.Start(context.Background(), "sql:exec",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+2)
+		attrs := make([]core.KeyValue, 0, len(c.options.DefaultAttributes)+2)
 		attrs = append(attrs, c.options.DefaultAttributes...)
 		attrs = append(
 			attrs,
 			attrDeprecated,
-			trace.StringAttribute(
-				"ocsql.deprecated", "driver does not support ExecerContext",
-			),
+			core.Key("ocsql.deprecated").String("driver does not support ExecerContext"),
 		)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 			if c.options.QueryParams {
 				attrs = append(attrs, paramsAttr(args)...)
 			}
 		}
-		span.AddAttributes(attrs...)
+		span.SetAttributes(attrs...)
 
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -200,32 +205,34 @@ func (c ocConn) Exec(query string, args []driver.Value) (res driver.Result, err 
 func (c ocConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (res driver.Result, err error) {
 	defer recordCallStats(ctx, "go.sql.exec")(err)
 
+	tr := global.TraceProvider().Tracer("sql.exec")
+
 	if execCtx, ok := c.parent.(driver.ExecerContext); ok {
-		parentSpan := trace.FromContext(ctx)
+		parentSpan := trace.SpanFromContext(ctx)
 		if !c.options.AllowRoot && parentSpan == nil {
 			return execCtx.ExecContext(ctx, query, args)
 		}
 
-		var span *trace.Span
+		var span trace.Span
 		if parentSpan == nil {
-			ctx, span = trace.StartSpan(ctx, "sql:exec",
+			ctx, span = tr.Start(ctx, "sql:exec",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
+				// trace.WithSampler(c.options.Sampler),
 			)
 		} else {
-			_, span = trace.StartSpan(ctx, "sql:exec",
+			_, span = tr.Start(ctx, "sql:exec",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
+				// trace.WithSampler(c.options.Sampler),
 			)
 		}
-		attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
+		attrs := append([]core.KeyValue(nil), c.options.DefaultAttributes...)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 			if c.options.QueryParams {
 				attrs = append(attrs, namedParamsAttr(args)...)
 			}
 		}
-		span.AddAttributes(attrs...)
+		span.SetAttributes(attrs...)
 
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -245,31 +252,31 @@ func (c ocConn) ExecContext(ctx context.Context, query string, args []driver.Nam
 func (c ocConn) Query(query string, args []driver.Value) (rows driver.Rows, err error) {
 	defer recordCallStats(context.Background(), "go.sql.query")(err)
 
+	tr := global.TraceProvider().Tracer("sql.query")
+
 	if queryer, ok := c.parent.(driver.Queryer); ok {
 		if !c.options.AllowRoot {
 			return queryer.Query(query, args)
 		}
 
-		ctx, span := trace.StartSpan(context.Background(), "sql:query",
+		ctx, span := tr.Start(context.Background(), "sql:query",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+2)
+		attrs := make([]core.KeyValue, 0, len(c.options.DefaultAttributes)+2)
 		attrs = append(attrs, c.options.DefaultAttributes...)
 		attrs = append(
 			attrs,
 			attrDeprecated,
-			trace.StringAttribute(
-				"ocsql.deprecated", "driver does not support QueryerContext",
-			),
+			core.Key("ocsql.deprecated").String("driver does not support QueryerContext"),
 		)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 			if c.options.QueryParams {
 				attrs = append(attrs, paramsAttr(args)...)
 			}
 		}
-		span.AddAttributes(attrs...)
+		span.SetAttributes(attrs...)
 
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -290,32 +297,34 @@ func (c ocConn) Query(query string, args []driver.Value) (rows driver.Rows, err 
 func (c ocConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (rows driver.Rows, err error) {
 	defer recordCallStats(ctx, "go.sql.query")(err)
 
+	tr := global.TraceProvider().Tracer("sql.query")
+
 	if queryerCtx, ok := c.parent.(driver.QueryerContext); ok {
-		parentSpan := trace.FromContext(ctx)
+		parentSpan := trace.SpanFromContext(ctx)
 		if !c.options.AllowRoot && parentSpan == nil {
 			return queryerCtx.QueryContext(ctx, query, args)
 		}
 
-		var span *trace.Span
+		var span trace.Span
 		if parentSpan == nil {
-			ctx, span = trace.StartSpan(ctx, "sql:query",
+			ctx, span = tr.Start(ctx, "sql:query",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
+				// trace.WithSampler(c.options.Sampler),
 			)
 		} else {
-			_, span = trace.StartSpan(ctx, "sql:query",
+			_, span = tr.Start(ctx, "sql:query",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithSampler(c.options.Sampler),
+				// trace.WithSampler(c.options.Sampler),
 			)
 		}
-		attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
+		attrs := append([]core.KeyValue(nil), c.options.DefaultAttributes...)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 			if c.options.QueryParams {
 				attrs = append(attrs, namedParamsAttr(args)...)
 			}
 		}
-		span.AddAttributes(attrs...)
+		span.SetAttributes(attrs...)
 
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -336,18 +345,20 @@ func (c ocConn) QueryContext(ctx context.Context, query string, args []driver.Na
 func (c ocConn) Prepare(query string) (stmt driver.Stmt, err error) {
 	defer recordCallStats(context.Background(), "go.sql.prepare")(err)
 
+	tr := global.TraceProvider().Tracer("sql.prepare")
+
 	if c.options.AllowRoot {
-		_, span := trace.StartSpan(context.Background(), "sql:prepare",
+		_, span := tr.Start(context.Background(), "sql:prepare",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
-		attrs := make([]trace.Attribute, 0, len(c.options.DefaultAttributes)+1)
+		attrs := make([]core.KeyValue, 0, len(c.options.DefaultAttributes)+1)
 		attrs = append(attrs, c.options.DefaultAttributes...)
 		attrs = append(attrs, attrMissingContext)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 		}
-		span.AddAttributes(attrs...)
+		span.SetAttributes(attrs...)
 
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -375,15 +386,17 @@ func (c *ocConn) Begin() (driver.Tx, error) {
 func (c *ocConn) PrepareContext(ctx context.Context, query string) (stmt driver.Stmt, err error) {
 	defer recordCallStats(ctx, "go.sql.prepare")(err)
 
-	var span *trace.Span
-	attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
-	if c.options.AllowRoot || trace.FromContext(ctx) != nil {
-		ctx, span = trace.StartSpan(ctx, "sql:prepare",
+	tr := global.TraceProvider().Tracer("sql.prepare")
+
+	var span trace.Span
+	attrs := append([]core.KeyValue(nil), c.options.DefaultAttributes...)
+	if c.options.AllowRoot || trace.SpanFromContext(ctx) != nil {
+		ctx, span = tr.Start(ctx, "sql:prepare",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
 		if c.options.Query {
-			attrs = append(attrs, trace.StringAttribute("sql.query", query))
+			attrs = append(attrs, core.Key("sql.query").String(query))
 		}
 		defer func() {
 			setSpanStatus(span, c.options, err)
@@ -399,7 +412,7 @@ func (c *ocConn) PrepareContext(ctx context.Context, query string) (stmt driver.
 		}
 		stmt, err = c.parent.Prepare(query)
 	}
-	span.AddAttributes(attrs...)
+	span.SetAttributes(attrs...)
 	if err != nil {
 		return nil, err
 	}
@@ -411,32 +424,34 @@ func (c *ocConn) PrepareContext(ctx context.Context, query string) (stmt driver.
 func (c *ocConn) BeginTx(ctx context.Context, opts driver.TxOptions) (tx driver.Tx, err error) {
 	defer recordCallStats(ctx, "go.sql.begin")(err)
 
-	if !c.options.AllowRoot && trace.FromContext(ctx) == nil {
+	tr := global.TraceProvider().Tracer("sql.begin")
+
+	if !c.options.AllowRoot && trace.SpanFromContext(ctx) == nil {
 		if connBeginTx, ok := c.parent.(driver.ConnBeginTx); ok {
 			return connBeginTx.BeginTx(ctx, opts)
 		}
 		return c.parent.Begin()
 	}
 
-	var span *trace.Span
-	attrs := append([]trace.Attribute(nil), c.options.DefaultAttributes...)
+	var span trace.Span
+	attrs := append([]core.KeyValue(nil), c.options.DefaultAttributes...)
 
 	if ctx == nil || ctx == context.TODO() {
 		ctx = context.Background()
-		_, span = trace.StartSpan(ctx, "sql:begin_transaction",
+		_, span = tr.Start(ctx, "sql:begin_transaction",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
 		attrs = append(attrs, attrMissingContext)
 	} else {
-		_, span = trace.StartSpan(ctx, "sql:begin_transaction",
+		_, span = tr.Start(ctx, "sql:begin_transaction",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(c.options.Sampler),
+			// trace.WithSampler(c.options.Sampler),
 		)
 	}
 	defer func() {
 		if len(attrs) > 0 {
-			span.AddAttributes(attrs...)
+			span.SetAttributes(attrs...)
 		}
 		span.End()
 	}()
@@ -453,9 +468,7 @@ func (c *ocConn) BeginTx(ctx context.Context, opts driver.TxOptions) (tx driver.
 	attrs = append(
 		attrs,
 		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support ConnBeginTx",
-		),
+		core.Key("ocsql.deprecated").String("driver does not support ConnBeginTx"),
 	)
 	tx, err = c.parent.Begin()
 	setSpanStatus(span, c.options, err)
@@ -473,13 +486,15 @@ type ocResult struct {
 }
 
 func (r ocResult) LastInsertId() (id int64, err error) {
+	tr := global.TraceProvider().Tracer("sql.last_insert_id")
+
 	if r.options.LastInsertID {
-		_, span := trace.StartSpan(r.ctx, "sql:last_insert_id",
+		_, span := tr.Start(r.ctx, "sql:last_insert_id",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
+			// trace.WithSampler(r.options.Sampler),
 		)
 		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
+			span.SetAttributes(r.options.DefaultAttributes...)
 		}
 		defer func() {
 			setSpanStatus(span, r.options, err)
@@ -492,13 +507,15 @@ func (r ocResult) LastInsertId() (id int64, err error) {
 }
 
 func (r ocResult) RowsAffected() (cnt int64, err error) {
+	tr := global.TraceProvider().Tracer("sql.rows_affected")
+
 	if r.options.RowsAffected {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_affected",
+		_, span := tr.Start(r.ctx, "sql:rows_affected",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
+			// trace.WithSampler(r.options.Sampler),
 		)
 		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
+			span.SetAttributes(r.options.DefaultAttributes...)
 		}
 		defer func() {
 			setSpanStatus(span, r.options, err)
@@ -520,30 +537,30 @@ type ocStmt struct {
 func (s ocStmt) Exec(args []driver.Value) (res driver.Result, err error) {
 	defer recordCallStats(context.Background(), "go.sql.stmt.exec")(err)
 
+	tr := global.TraceProvider().Tracer("sql.stmt.exec")
+
 	if !s.options.AllowRoot {
 		return s.parent.Exec(args)
 	}
 
-	ctx, span := trace.StartSpan(context.Background(), "sql:exec",
+	ctx, span := tr.Start(context.Background(), "sql:exec",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(s.options.Sampler),
+		// trace.WithSampler(s.options.Sampler),
 	)
-	attrs := make([]trace.Attribute, 0, len(s.options.DefaultAttributes)+2)
+	attrs := make([]core.KeyValue, 0, len(s.options.DefaultAttributes)+2)
 	attrs = append(attrs, s.options.DefaultAttributes...)
 	attrs = append(
 		attrs,
 		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support StmtExecContext",
-		),
+		core.Key("ocsql.deprecated").String("driver does not support StmtExecContext"),
 	)
 	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
+		attrs = append(attrs, core.Key("sql.query").String(s.query))
 		if s.options.QueryParams {
 			attrs = append(attrs, paramsAttr(args)...)
 		}
 	}
-	span.AddAttributes(attrs...)
+	span.SetAttributes(attrs...)
 
 	defer func() {
 		setSpanStatus(span, s.options, err)
@@ -570,30 +587,30 @@ func (s ocStmt) NumInput() int {
 func (s ocStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 	defer recordCallStats(context.Background(), "go.sql.stmt.query")(err)
 
+	tr := global.TraceProvider().Tracer("sql.stmt.query")
+
 	if !s.options.AllowRoot {
 		return s.parent.Query(args)
 	}
 
-	ctx, span := trace.StartSpan(context.Background(), "sql:query",
+	ctx, span := tr.Start(context.Background(), "sql:query",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(s.options.Sampler),
+		// trace.WithSampler(s.options.Sampler),
 	)
-	attrs := make([]trace.Attribute, 0, len(s.options.DefaultAttributes)+2)
+	attrs := make([]core.KeyValue, 0, len(s.options.DefaultAttributes)+2)
 	attrs = append(attrs, s.options.DefaultAttributes...)
 	attrs = append(
 		attrs,
 		attrDeprecated,
-		trace.StringAttribute(
-			"ocsql.deprecated", "driver does not support StmtQueryContext",
-		),
+		core.Key("ocsql.deprecated").String("driver does not support StmtQueryContext"),
 	)
 	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
+		attrs = append(attrs, core.Key("sql.query").String(s.query))
 		if s.options.QueryParams {
 			attrs = append(attrs, paramsAttr(args)...)
 		}
 	}
-	span.AddAttributes(attrs...)
+	span.SetAttributes(attrs...)
 
 	defer func() {
 		setSpanStatus(span, s.options, err)
@@ -611,32 +628,34 @@ func (s ocStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 func (s ocStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res driver.Result, err error) {
 	defer recordCallStats(ctx, "go.sql.stmt.exec")(err)
 
-	parentSpan := trace.FromContext(ctx)
+	tr := global.TraceProvider().Tracer("sql.stmt.query")
+
+	parentSpan := trace.SpanFromContext(ctx)
 	if !s.options.AllowRoot && parentSpan == nil {
 		// we already tested driver to implement StmtExecContext
 		return s.parent.(driver.StmtExecContext).ExecContext(ctx, args)
 	}
 
-	var span *trace.Span
+	var span trace.Span
 	if parentSpan == nil {
-		ctx, span = trace.StartSpan(ctx, "sql:exec",
+		ctx, span = tr.Start(ctx, "sql:exec",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
+			// trace.WithSampler(s.options.Sampler),
 		)
 	} else {
-		_, span = trace.StartSpan(ctx, "sql:exec",
+		_, span = tr.Start(ctx, "sql:exec",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
+			// trace.WithSampler(s.options.Sampler),
 		)
 	}
-	attrs := append([]trace.Attribute(nil), s.options.DefaultAttributes...)
+	attrs := append([]core.KeyValue(nil), s.options.DefaultAttributes...)
 	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
+		attrs = append(attrs, core.Key("sql.query").String(s.query))
 		if s.options.QueryParams {
 			attrs = append(attrs, namedParamsAttr(args)...)
 		}
 	}
-	span.AddAttributes(attrs...)
+	span.SetAttributes(attrs...)
 
 	defer func() {
 		setSpanStatus(span, s.options, err)
@@ -656,32 +675,34 @@ func (s ocStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res 
 func (s ocStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (rows driver.Rows, err error) {
 	defer recordCallStats(ctx, "go.sql.stmt.query")(err)
 
-	parentSpan := trace.FromContext(ctx)
+	tr := global.TraceProvider().Tracer("sql.stmt.query")
+
+	parentSpan := trace.SpanFromContext(ctx)
 	if !s.options.AllowRoot && parentSpan == nil {
 		// we already tested driver to implement StmtQueryContext
 		return s.parent.(driver.StmtQueryContext).QueryContext(ctx, args)
 	}
 
-	var span *trace.Span
+	var span trace.Span
 	if parentSpan == nil {
-		ctx, span = trace.StartSpan(ctx, "sql:query",
+		ctx, span = tr.Start(ctx, "sql:query",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
+			// trace.WithSampler(s.options.Sampler),
 		)
 	} else {
-		_, span = trace.StartSpan(ctx, "sql:query",
+		_, span = tr.Start(ctx, "sql:query",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(s.options.Sampler),
+			// trace.WithSampler(s.options.Sampler),
 		)
 	}
-	attrs := append([]trace.Attribute(nil), s.options.DefaultAttributes...)
+	attrs := append([]core.KeyValue(nil), s.options.DefaultAttributes...)
 	if s.options.Query {
-		attrs = append(attrs, trace.StringAttribute("sql.query", s.query))
+		attrs = append(attrs, core.Key("sql.query").String(s.query))
 		if s.options.QueryParams {
 			attrs = append(attrs, namedParamsAttr(args)...)
 		}
 	}
-	span.AddAttributes(attrs...)
+	span.SetAttributes(attrs...)
 
 	defer func() {
 		setSpanStatus(span, s.options, err)
@@ -786,13 +807,15 @@ func (r ocRows) Columns() []string {
 }
 
 func (r ocRows) Close() (err error) {
+	tr := global.TraceProvider().Tracer("sql.rows_close")
+
 	if r.options.RowsClose {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_close",
+		_, span := tr.Start(r.ctx, "sql:rows_close",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
+			// trace.WithSampler(r.options.Sampler),
 		)
 		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
+			span.SetAttributes(r.options.DefaultAttributes...)
 		}
 		defer func() {
 			setSpanStatus(span, r.options, err)
@@ -805,13 +828,15 @@ func (r ocRows) Close() (err error) {
 }
 
 func (r ocRows) Next(dest []driver.Value) (err error) {
+	tr := global.TraceProvider().Tracer("sql.rows_next")
+
 	if r.options.RowsNext {
-		_, span := trace.StartSpan(r.ctx, "sql:rows_next",
+		_, span := tr.Start(r.ctx, "sql:rows_next",
 			trace.WithSpanKind(trace.SpanKindClient),
-			trace.WithSampler(r.options.Sampler),
+			// trace.WithSampler(r.options.Sampler),
 		)
 		if len(r.options.DefaultAttributes) > 0 {
-			span.AddAttributes(r.options.DefaultAttributes...)
+			span.SetAttributes(r.options.DefaultAttributes...)
 		}
 		defer func() {
 			if err == io.EOF {
@@ -865,12 +890,14 @@ type ocTx struct {
 func (t ocTx) Commit() (err error) {
 	defer recordCallStats(context.Background(), "go.sql.commit")(err)
 
-	_, span := trace.StartSpan(t.ctx, "sql:commit",
+	tr := global.TraceProvider().Tracer("sql.commit")
+
+	_, span := tr.Start(t.ctx, "sql:commit",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(t.options.Sampler),
+		// trace.WithSampler(t.options.Sampler),
 	)
 	if len(t.options.DefaultAttributes) > 0 {
-		span.AddAttributes(t.options.DefaultAttributes...)
+		span.SetAttributes(t.options.DefaultAttributes...)
 	}
 	defer func() {
 		setSpanStatus(span, t.options, err)
@@ -884,12 +911,14 @@ func (t ocTx) Commit() (err error) {
 func (t ocTx) Rollback() (err error) {
 	defer recordCallStats(context.Background(), "go.sql.rollback")(err)
 
-	_, span := trace.StartSpan(t.ctx, "sql:rollback",
+	tr := global.TraceProvider().Tracer("sql.rollback")
+
+	_, span := tr.Start(t.ctx, "sql:rollback",
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithSampler(t.options.Sampler),
+		// trace.WithSampler(t.options.Sampler),
 	)
 	if len(t.options.DefaultAttributes) > 0 {
-		span.AddAttributes(t.options.DefaultAttributes...)
+		span.SetAttributes(t.options.DefaultAttributes...)
 	}
 	defer func() {
 		setSpanStatus(span, t.options, err)
@@ -900,8 +929,8 @@ func (t ocTx) Rollback() (err error) {
 	return
 }
 
-func paramsAttr(args []driver.Value) []trace.Attribute {
-	attrs := make([]trace.Attribute, 0, len(args))
+func paramsAttr(args []driver.Value) []core.KeyValue {
+	attrs := make([]core.KeyValue, 0, len(args))
 	for i, arg := range args {
 		key := "sql.arg" + strconv.Itoa(i)
 		attrs = append(attrs, argToAttr(key, arg))
@@ -909,8 +938,8 @@ func paramsAttr(args []driver.Value) []trace.Attribute {
 	return attrs
 }
 
-func namedParamsAttr(args []driver.NamedValue) []trace.Attribute {
-	attrs := make([]trace.Attribute, 0, len(args))
+func namedParamsAttr(args []driver.NamedValue) []core.KeyValue {
+	attrs := make([]core.KeyValue, 0, len(args))
 	for _, arg := range args {
 		var key string
 		if arg.Name != "" {
@@ -923,55 +952,55 @@ func namedParamsAttr(args []driver.NamedValue) []trace.Attribute {
 	return attrs
 }
 
-func argToAttr(key string, val interface{}) trace.Attribute {
+func argToAttr(key string, val interface{}) core.KeyValue {
 	switch v := val.(type) {
 	case nil:
-		return trace.StringAttribute(key, "")
+		return core.Key(key).String("")
 	case int64:
-		return trace.Int64Attribute(key, v)
+		return core.Key(key).Int64(v)
 	case float64:
-		return trace.StringAttribute(key, fmt.Sprintf("%f", v))
+		return core.Key(key).Float64(v)
 	case bool:
-		return trace.BoolAttribute(key, v)
+		return core.Key(key).Bool(v)
 	case []byte:
 		if len(v) > 256 {
 			v = v[0:256]
 		}
-		return trace.StringAttribute(key, fmt.Sprintf("%s", v))
+		return core.Key(key).String(fmt.Sprintf("%s", v))
 	default:
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 256 {
 			s = s[0:256]
 		}
-		return trace.StringAttribute(key, s)
+		return core.Key(key).String(s)
 	}
 }
 
-func setSpanStatus(span *trace.Span, opts TraceOptions, err error) {
-	var status trace.Status
+func setSpanStatus(span trace.Span, opts TraceOptions, err error) {
+	var status codes.Code
 	switch err {
 	case nil:
-		status.Code = trace.StatusCodeOK
+		status = codes.OK
 		span.SetStatus(status)
 		return
 	case driver.ErrSkip:
-		status.Code = trace.StatusCodeUnimplemented
+		status = codes.Unimplemented
 		if opts.DisableErrSkip {
 			// Suppress driver.ErrSkip since at runtime some drivers might not have
 			// certain features, and an error would pollute many spans.
-			status.Code = trace.StatusCodeOK
+			status = codes.OK
 		}
 	case context.Canceled:
-		status.Code = trace.StatusCodeCancelled
+		status = codes.Canceled
 	case context.DeadlineExceeded:
-		status.Code = trace.StatusCodeDeadlineExceeded
+		status = codes.DeadlineExceeded
 	case sql.ErrNoRows:
-		status.Code = trace.StatusCodeNotFound
+		status = codes.NotFound
 	case sql.ErrTxDone, errConnDone:
-		status.Code = trace.StatusCodeFailedPrecondition
+		status = codes.FailedPrecondition
 	default:
-		status.Code = trace.StatusCodeUnknown
+		status = codes.Unknown
 	}
-	status.Message = err.Error()
+	// status.Message = err.Error()
 	span.SetStatus(status)
 }
