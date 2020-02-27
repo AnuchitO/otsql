@@ -32,8 +32,6 @@ var (
 	regMu              sync.Mutex
 	attrMissingContext = core.Key("ocsql.warning").String("missing upstream context")
 	attrDeprecated     = core.Key("ocsql.warning").String("database driver uses deprecated features")
-	// attrMissingContext = trace.StringAttribute("ocsql.warning", "missing upstream context")
-	// attrDeprecated     = trace.StringAttribute("ocsql.warning", "database driver uses deprecated features")
 
 	// Compile time assertions
 	_ driver.Driver                         = &ocDriver{}
