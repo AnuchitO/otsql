@@ -1,4 +1,4 @@
-module go.opentelemetry.io/plugin/ocsql
+module github.com/pallat/ocsql
 
 go 1.13
 
