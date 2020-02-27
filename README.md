@@ -4,14 +4,15 @@
 [![GoDoc](https://godoc.org/contrib.go.opencensus.io/integrations/ocsql?status.svg)](https://godoc.org/contrib.go.opencensus.io/integrations/ocsql)
 [![Sourcegraph](https://sourcegraph.com/github.com/opencensus-integrations/ocsql/-/badge.svg)](https://sourcegraph.com/github.com/opencensus-integrations/ocsql?badge)
 
-OpenCensus SQL database driver wrapper.
+OpenTelemetry SQL database driver wrapper.
+The original source code from OpenCensus SQL database driver wrapper.
 
 Add an ocsql wrapper to your existing database code to instrument the
 interactions with the database.
 
 ## installation
 
-go get -u contrib.go.opencensus.io/integrations/ocsql
+go get -u github.com/pallat/ocsql
 
 ## initialize
 
@@ -22,7 +23,7 @@ Example:
 ```go
 import (
     _ "github.com/mattn/go-sqlite3"
-    "contrib.go.opencensus.io/integrations/ocsql"
+    "github.com/pallat/ocsql"
 )
 
 var (
@@ -49,7 +50,7 @@ Example:
 ```go
 import (
     sqlite3 "github.com/mattn/go-sqlite3"
-    "contrib.go.opencensus.io/integrations/ocsql"
+    "github.com/pallat/ocsql"
 )
 
 var (
@@ -73,7 +74,7 @@ wrap an existing driver.Conn interface directly with ocsql.
 
 Example:
 ```go
-import "contrib.go.opencensus.io/integrations/ocsql"
+import "github.com/pallat/ocsql"
 
 func GetConn(...) driver.Conn {
     // Create custom driver.Conn.
@@ -91,7 +92,7 @@ register a driver.Driver.
 Example:
 ```go
 import(
-    "contrib.go.opencensus.io/integrations/ocsql"
+    "github.com/pallat/ocsql"
     "github.com/lib/pq"
 )
 
